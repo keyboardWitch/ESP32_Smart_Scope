@@ -8,12 +8,11 @@
 
 
 extern Adafruit_MPU6050 mpu;
-
-
 extern MPU6050CalibrationData cachedMPUCalibrationData;
 
-
-
+// 像素到弧度的转换系数，用于将像素偏移转换为角度
+// 这个值需要根据实际显示系统的DPI和物理尺寸进行校准
+#define DROP_POINT_PX_PER_RADIAN 100.0f
 
 static float filteredIMUPitch = 0.0f;
 
@@ -84,98 +83,38 @@ float getIMUPitchForBallistics() {
 }
 
 
-float calculateVerticalCorrectionWithDrag(float distance, float bulletVelocity, float dragCoefficientK) {
-  if (bulletVelocity <= 0.0f || distance <= 0.0f || dragCoefficientK <= 0.0f) {
-    return 0.0f;
+// 新增：根据距离计算弹着点Y坐标（像素偏移）
+int calculateDropPointPixelOffset(int distance, const BallisticCalibrationData& calibData) {
+  if (!calibData.isCalibrated || calibData.calibratedPoints < 3) {
+    // 未校准，返回中心位置（0偏移）
+    return 0;
   }
   
-  
-  float dropHeight = calcPhysicsDrop(distance, bulletVelocity, dragCoefficientK);
-  
-  
-  
-  return atan2(dropHeight, distance);
-}
-
-
-float calculateVerticalCorrectionWithPolynomial(float distance, const BallisticCalibrationData& calibData) {
-  if (!calibData.isCalibrated || calibData.calibratedPoints < 2) {
-    return 0.0f;
+  // 基于分段线性插值计算Y偏移
+  if (distance <= 5) {
+    // 0-5m: 从0到pixelOffset5m线性插值
+    float ratio = (float)distance / 5.0f;
+    return (int)(calibData.pixelOffset5m * ratio);
   }
-  
-  float dropHeight = 0.0f;
-  
-  
-  if (distance <= 5.0f && calibData.calibratedPoints >= 1) {
-    
-    
-    float dropHeight5m = 5.0f * tan(calibData.pitch5m);
-    
-    
-    
-    dropHeight5m = -dropHeight5m;
-    
-    
-    if (dropHeight5m < 0.0f) {
-      dropHeight5m = 0.0f;
-    }
-    
-    
-    dropHeight = (distance / 5.0f) * dropHeight5m;
-    
-    
-
-  } else {
-    
-    
-    
-    dropHeight = calibData.modelParams.polynomialFit.coefficientA * distance * distance + 
-                calibData.modelParams.polynomialFit.coefficientB * distance + 
-                calibData.modelParams.polynomialFit.coefficientC;
-    
-    
-    if (dropHeight < 0.0f) {
-      dropHeight = 0.0f;
-    }
+  else if (distance <= 10) {
+    // 5-10m: 从pixelOffset5m到pixelOffset10m线性插值
+    float ratio = (float)(distance - 5) / 5.0f;
+    int offset = calibData.pixelOffset5m + (int)((calibData.pixelOffset10m - calibData.pixelOffset5m) * ratio);
+    return offset;
   }
-  
-  
-  return atan2(dropHeight, distance);
-}
-
-
-float calculateVerticalCorrectionByModel(float distance, float bulletVelocity, 
-                                       const BallisticCalibrationData& calibData) {
-  if (calibData.isCalibrated && calibData.calibratedPoints >= 3) {
-    if (calibData.modelType == MODEL_TYPE_PHYSICS_DRAG) {
-      
-      return calculateVerticalCorrectionWithDrag(distance, bulletVelocity, 
-                                               calibData.modelParams.physicsDrag.dragCoefficientK);
-    } else if (calibData.modelType == MODEL_TYPE_POLYNOMIAL_FIT) {
-      
-      return calculateVerticalCorrectionWithPolynomial(distance, calibData);
-    }
-    
+  else if (distance <= 15) {
+    // 10-15m: 从pixelOffset10m到pixelOffset15m线性插值
+    float ratio = (float)(distance - 10) / 5.0f;
+    int offset = calibData.pixelOffset10m + (int)((calibData.pixelOffset15m - calibData.pixelOffset10m) * ratio);
+    return offset;
   }
-  
-  
-  return calculateVerticalCorrection(distance, bulletVelocity);
-}
-
-
-float calculateVerticalCorrection(float distance, float bulletVelocity) {
-  if (bulletVelocity <= 0.0f || distance <= 0.0f) {
-    return 0.0f;
+  else {
+    // 15m以上: 继续使用15m的偏移趋势进行外推
+    // 简单线性外推：每增加1米，偏移增加(pixelOffset15m - pixelOffset10m)/5
+    float extrapolationRatio = (float)(distance - 15) / 5.0f;
+    int additionalOffset = (int)((calibData.pixelOffset15m - calibData.pixelOffset10m) * extrapolationRatio);
+    return calibData.pixelOffset15m + additionalOffset;
   }
-  
-  
-  float ratio = GRAVITY_ACCEL * distance / (bulletVelocity * bulletVelocity);
-  
-  
-  ratio = constrain(ratio, -1.0f, 1.0f);
-  
-  
-  return 0.5f * asin(ratio);
 }
 
 
@@ -185,23 +124,15 @@ float calculateHorizontalCorrection(float distance, float bulletVelocity,
     return 0.0f; 
   }
   
-  
   float flightTime = distance / bulletVelocity;
-  
-  
-  
   float windDirRad = windDirection * PI / 180.0f;
   float crossWind = -windSpeed * sin(windDirRad);
-  
-  
   float horizontalOffset = crossWind * flightTime * WIND_DRAG_COEFF;
-  
-  
-  
   return atan2(horizontalOffset, distance);
 }
 
 
+// 修改原有的弹道计算函数，现在主要返回像素偏移而不是角度
 BallisticResult calculateBallisticCorrection(float distance, float bulletVelocity, 
                                            float windSpeed, float windDirection,
                                            const BallisticCalibrationData& calibData) {
@@ -215,36 +146,37 @@ BallisticResult calculateBallisticCorrection(float distance, float bulletVelocit
     return result; 
   }
   
+  // 计算Y轴像素偏移（用于主显示）
+  int pixelOffsetY = calculateDropPointPixelOffset((int)distance, calibData);
   
-  float verticalCorrection = 0.0f;
+  // 转换为弧度角度（用于兼容现有接口）
+  float angleRadians = (float)pixelOffsetY / DROP_POINT_PX_PER_RADIAN;
+  result.correctionPitch = angleRadians;
   
-  float horizontalCorrection = 0.0f;
-  
-  
-  verticalCorrection = calculateVerticalCorrectionByModel(distance, bulletVelocity, calibData);
-  
-  
-  if (calibData.isCalibrated) {
-    verticalCorrection += calibData.mountAngleOffset;
-  } else {
-    verticalCorrection += MOUNT_ANGLE_OFFSET;
+  // 风偏计算保持不变
+  if (windSpeed > 0.5f && bulletVelocity > 0.0f) {
+    float flightTime = distance / bulletVelocity;
+    float windDirRad = windDirection * PI / 180.0f;
+    float crossWind = -windSpeed * sin(windDirRad);
+    float horizontalOffset = crossWind * flightTime * WIND_DRAG_COEFF;
+    result.correctionYaw = atan2(horizontalOffset, distance);
   }
   
-  
-  horizontalCorrection = calculateHorizontalCorrection(distance, bulletVelocity, 
-                                                      windSpeed, windDirection);
-  
-  
-  if (isnan(verticalCorrection) || isinf(verticalCorrection) || 
-      isnan(horizontalCorrection) || isinf(horizontalCorrection)) {
-    return result; 
-  }
-  
-  result.correctionPitch = verticalCorrection;
-  result.correctionYaw = horizontalCorrection;
-  
-  result.correctionMOA = verticalCorrection * RAD_TO_MOA;
+  result.correctionMOA = result.correctionPitch * RAD_TO_MOA;
   result.isValid = true;
   
   return result;
+}
+
+
+// 保留原有函数以维持接口兼容性
+float calculateVerticalCorrection(float distance, float bulletVelocity) {
+  if (bulletVelocity <= 0.0f || distance <= 0.0f) {
+    return 0.0f;
+  }
+  
+  // 简化的默认弹道计算（未校准时使用）
+  float ratio = GRAVITY_ACCEL * distance / (bulletVelocity * bulletVelocity);
+  ratio = constrain(ratio, -1.0f, 1.0f);
+  return 0.5f * asin(ratio);
 }

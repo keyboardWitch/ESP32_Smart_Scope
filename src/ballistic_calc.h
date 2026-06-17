@@ -22,15 +22,16 @@ struct BallisticResult {
 };
 
 
+// 主要的弹道修正计算函数
 BallisticResult calculateBallisticCorrection(float distance, float bulletVelocity, 
                                            float windSpeed, float windDirection,
                                            const BallisticCalibrationData& calibData);
 
+// 计算水平风偏修正
+float calculateHorizontalCorrection(float distance, float bulletVelocity, 
+                                   float windSpeed, float windDirection);
 
-float calculateVerticalCorrection(float distance, float bulletVelocity);
-
-
-float calculateVerticalCorrectionByModel(float distance, float bulletVelocity, 
-                                       const BallisticCalibrationData& calibData);
+// 基于像素偏移计算垂直修正角度
+float calculateVerticalCorrectionByPixelOffset(float distance, const BallisticCalibrationData& calibData);
 
 #endif 

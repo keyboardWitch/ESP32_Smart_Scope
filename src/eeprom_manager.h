@@ -36,7 +36,8 @@ struct PresetData {
   
   bool tiltModeEnabled;      
   
-  int  mountAngleOffset;      
+  int mountAngleOffset;       // Y方向偏移
+  int mountAngleOffsetX;      // X方向偏移
 
   
   PresetData() {
@@ -48,14 +49,11 @@ struct PresetData {
     ammoCount = 0;           
     rangeMode = 0;           
     
-    ballisticCalib.modelParams.physicsDrag.dragCoefficientK = 0.1f;
-    ballisticCalib.pitch5m = 0.0f;
-    ballisticCalib.pitch10m = 0.0f;
-    ballisticCalib.pitch15m = 0.0f;
-    ballisticCalib.mountAngleOffset = MOUNT_ANGLE_OFFSET; 
+    ballisticCalib.pixelOffset5m = 0;
+    ballisticCalib.pixelOffset10m = 0;
+    ballisticCalib.pixelOffset15m = 0;
     ballisticCalib.isCalibrated = false;
     ballisticCalib.calibratedPoints = 0;
-    ballisticCalib.modelType = MODEL_TYPE_OFF; 
     ballisticCalib.checksum = 0;
     
     
@@ -65,6 +63,8 @@ struct PresetData {
     
     
     tiltModeEnabled = false;   
+    mountAngleOffset = 0;        // 初始化Y方向偏移为0
+    mountAngleOffsetX = 0;       // 初始化X方向偏移为0
   }
 };
 

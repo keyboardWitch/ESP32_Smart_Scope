@@ -8,23 +8,24 @@
 #include "preset_manager.h"
 #include <cmath>
 
-
+// 外部变量声明
+extern PresetManagerState presetManagerState;
 extern Adafruit_MPU6050 mpu;
-
-
 extern MPU6050CalibrationData cachedMPUCalibrationData;
-
+extern void* g_display;
+extern SystemMode currentMode;
 
 BallisticCalibrationState ballisticState;
 
 void initBallisticCalibration() {
-  ballisticState.selectedField = BALLISTIC_FIELD_MODEL_TYPE;
+  ballisticState.selectedField = BALLISTIC_FIELD_CALIBRATION;
   ballisticState.currentPoint = CALIB_POINT_5M;
+  ballisticState.calibrationMode = CALIB_MODE_MENU;
   
   
   for (int i = 0; i < 3; i++) {
-    ballisticState.recordedPitch[i] = 0.0f;
     ballisticState.pointRecorded[i] = false;
+    ballisticState.tempPixelOffsets[i] = 0;
   }
   
   
@@ -35,273 +36,161 @@ void initBallisticCalibration() {
   ballisticState.result = currentPreset.ballisticCalib;
   
   
-  if (ballisticState.result.modelType < MODEL_TYPE_OFF || 
-      ballisticState.result.modelType > MODEL_TYPE_POLYNOMIAL_FIT) {
-    ballisticState.result.modelType = MODEL_TYPE_OFF;
-  }
-  
-  
   if (!ballisticState.result.isCalibrated) {
-    ballisticState.result.modelParams.physicsDrag.dragCoefficientK = 0.1f;
-    ballisticState.result.pitch5m = 0.0f;
-    ballisticState.result.pitch10m = 0.0f;
-    ballisticState.result.pitch15m = 0.0f;
-    ballisticState.result.mountAngleOffset = MOUNT_ANGLE_OFFSET;
+    ballisticState.result.pixelOffset5m = 0;
+    ballisticState.result.pixelOffset10m = 0;
+    ballisticState.result.pixelOffset15m = 0;
     ballisticState.result.calibratedPoints = 0;
     ballisticState.result.checksum = 0;
-    
   }
   
   ballisticState.calibrationComplete = false;
+  
+  // 初始化手动校准相关字段
+  ballisticState.centerX = SCREEN_WIDTH / 2;
+  ballisticState.centerY = SCREEN_HEIGHT / 2;
+  ballisticState.impactX = ballisticState.centerX;
+  ballisticState.impactY = ballisticState.centerY;
 }
 
 
-float getIMUPitch() {
-  sensors_event_t a, g, temp;
-  mpu.getEvent(&a, &g, &temp);
+// 将像素Y坐标转换为下坠高度（米）
+float pixelToDropHeight(int pixelY, float distance) {
+  // 屏幕中心为参考点，Y轴向下为正
+  int centerY = SCREEN_HEIGHT / 2;
+  int deltaY = pixelY - centerY;
   
+  // 使用配置中的转换因子
+  float angleRadians = (float)deltaY / DROP_POINT_PX_PER_RADIAN;
+  float dropHeight = distance * tan(angleRadians);
   
-  
-  
-  
-  
-  
-  
-  if (isnan(a.acceleration.y) || isnan(a.acceleration.z)) {
-    
-    return 0.0f;
-  }
-  
-  
-  
-  float accelY = a.acceleration.y; 
-  float accelZ = a.acceleration.z;  
-  
-  
-  if (cachedMPUCalibrationData.isCalibrated) {
-    
-    accelY -= cachedMPUCalibrationData.accelOffsetY;
-    accelZ -= cachedMPUCalibrationData.accelOffsetZ;
-  }
-
-  
-  if (fabs(accelZ) < 0.01f) {
-    accelZ = (accelZ >= 0) ? 0.01f : -0.01f;
-  }
-  
-  
-  float pitch = atan2(accelY, accelZ);
-  
-  
-  
-  if (cachedMPUCalibrationData.isCalibrated) {
-    pitch -= cachedMPUCalibrationData.pitchAngleOffset;
-  }
-  
-  
-  if (isnan(pitch)) {
-    
-    return 0.0f;
-  }
-
-  return pitch;
-}
-
-
-float calcPhysicsDrop(float distance, float bulletVelocity, float dragCoefficientK) {
-  float g = 9.8f;
-  
-  
-  float kd_v0 = dragCoefficientK * distance / bulletVelocity;
-  float exp_term = exp(kd_v0);
-  float drop = (g / (dragCoefficientK * dragCoefficientK)) * (exp_term - 1.0f) - (g * distance) / (dragCoefficientK * bulletVelocity);
-  return drop;
-}
-
-
-float calibrateKByPitch(float pitch5, float pitch10, float pitch15, float bulletVelocity) {
-  
-  
-  float h5  =  5.0f * tan(pitch5);
-  float h10 = 10.0f * tan(pitch10);
-  float h15 = 15.0f * tan(pitch15);
-
-  float low_k = 0.05f;   
-  float high_k = 50.0f;   //原来最大为2.5，放宽范围以适应更大阻力的子弹（如重弹头或低速弹）
-  float best_k = 0.1f;
-  float min_error = 999999.0f;
-
-  
-  for(float test_k = low_k; test_k <= high_k; test_k += 0.01f) {
-    float c5  = calcPhysicsDrop(5.0f,  bulletVelocity, test_k);
-    float c10 = calcPhysicsDrop(10.0f, bulletVelocity, test_k);
-    float c15 = calcPhysicsDrop(15.0f, bulletVelocity, test_k);
-
-    
-    float error = pow(c5 - h5, 2) + pow(c10 - h10, 2) + pow(c15 - h15, 2);
-
-    if(error < min_error) {
-      min_error = error;
-      best_k = test_k;
-    }
-  }
-  
-  
-  
-  if (best_k < low_k) {
-    best_k = low_k; 
-  }
-  if (best_k > high_k) {
-    best_k = high_k; 
-  }
-  
-  
-  return best_k; 
-}
-
-
-
-
-bool calibratePolynomialCoefficients(float pitch5, float pitch10, float pitch15, PolynomialFitModelParams& params) {
-  
-  
-  float h5 = 5.0f * tan(pitch5);
-  float h10 = 10.0f * tan(pitch10);
-  float h15 = 15.0f * tan(pitch15);
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  float denominator = 50.0f;
-  if (fabs(denominator) < 1e-6f) {
-    
-    params.coefficientA = 0.0f;
-    params.coefficientB = 0.0f;
-    params.coefficientC = 0.0f;
-    return false;
-  }
-  
-  params.coefficientA = (h15 - 2.0f * h10 + h5) / denominator;
-  
-  
-  
-  
-  params.coefficientB = (h10 - h5 - 75.0f * params.coefficientA) / 5.0f;
-  
-  
-  
-  params.coefficientC = h5 - 25.0f * params.coefficientA - 5.0f * params.coefficientB;
-  
-  
-  if (isnan(params.coefficientA) || isnan(params.coefficientB) || isnan(params.coefficientC) ||
-      isinf(params.coefficientA) || isinf(params.coefficientB) || isinf(params.coefficientC)) {
-    params.coefficientA = 0.0f;
-    params.coefficientB = 0.0f;
-    params.coefficientC = 0.0f;
-    return false;
-  }
-  
-  return true;
+  return dropHeight;
 }
 
 
 bool calculateBallisticCoefficients() {
+  // 这个函数现在不需要了，逻辑已移到handleCalibrationAdjustInput中
+  return true;
+}
+
+
+void drawCalibrationAdjustScreen() {
+  if (!g_display) return;
   
-  if (!ballisticState.pointRecorded[0] || 
-      !ballisticState.pointRecorded[1] || 
-      !ballisticState.pointRecorded[2]) {
-    return false;
+  Adafruit_SSD1306* display = static_cast<Adafruit_SSD1306*>(g_display);
+  display->clearDisplay();
+  
+  // 获取当前距离
+  float distances[] = {5.0f, 10.0f, 15.0f};
+  float currentDistance = distances[ballisticState.currentPoint];
+  
+  // 显示标题
+  display->setTextSize(1);
+  display->setTextColor(WHITE);
+  char title[20];
+  sprintf(title, "Cal %dm", (int)currentDistance);
+  display->setCursor(5, 2);
+  display->print(title);
+  
+  // 绘制十字准星（屏幕中心）
+  int centerX = ballisticState.centerX;
+  int centerY = ballisticState.centerY;
+  
+  // 十字准星
+  display->drawLine(centerX - 5, centerY, centerX + 5, centerY, WHITE);
+  display->drawLine(centerX, centerY - 5, centerX, centerY + 5, WHITE);
+  
+  // 绘制3x3的弹着点方块
+  int impactX = ballisticState.impactX;
+  int impactY = ballisticState.impactY;
+  display->fillRect(impactX - 1, impactY - 1, 3, 3, WHITE);
+  
+  // 显示当前偏移值
+  int deltaX = impactX - centerX;
+  int deltaY = impactY - centerY;
+  char offsetInfo[30];
+  sprintf(offsetInfo, "X:%d Y:%d", deltaX, deltaY);
+  display->setCursor(SCREEN_WIDTH - 40, 2);
+  display->print(offsetInfo);
+  
+  display->display();
+}
+
+
+void handleCalibrationAdjustInput() {
+  bool needRedraw = false;
+  
+  // 上下调整弹着点位置（只允许Y轴调整，X轴保持在中心）
+  if (isButtonPressed(BTN_INDEX_UP)) {
+    if (ballisticState.impactY > 0) {
+      ballisticState.impactY--;
+      needRedraw = true;
+    }
   }
-  
-  
-  PresetData currentPreset;
-  loadPresetData(presetManagerState.selectedPreset, currentPreset);
-  float bulletVelocity = currentPreset.bulletVelocity;
-  if (bulletVelocity <= 0.0f) {
-    bulletVelocity = 50.0f; 
-  }
-  
-  
-  float pitch5 = ballisticState.recordedPitch[0];
-  float pitch10 = ballisticState.recordedPitch[1];
-  float pitch15 = ballisticState.recordedPitch[2];
-  
-  
-  if (ballisticState.result.modelType == MODEL_TYPE_PHYSICS_DRAG) {
-    
-    float bestK = calibrateKByPitch(pitch5, pitch10, pitch15, bulletVelocity);
-    
-    
-    ballisticState.result.modelParams.physicsDrag.dragCoefficientK = bestK;
-  } else if (ballisticState.result.modelType == MODEL_TYPE_POLYNOMIAL_FIT) {
-    
-    if (!calibratePolynomialCoefficients(pitch5, pitch10, pitch15, 
-                                       ballisticState.result.modelParams.polynomialFit)) {
-      return false;
+  if (isButtonPressed(BTN_INDEX_DOWN)) {
+    if (ballisticState.impactY < SCREEN_HEIGHT - 1) {
+      ballisticState.impactY++;
+      needRedraw = true;
     }
   }
   
-  
-  
-  ballisticState.result.pitch5m = pitch5;
-  ballisticState.result.pitch10m = pitch10;
-  ballisticState.result.pitch15m = pitch15;
-  ballisticState.result.isCalibrated = true;
-  ballisticState.result.calibratedPoints = 3;
-  
-  
-  uint32_t sum = 0;
-  
-  if (ballisticState.result.modelType == MODEL_TYPE_PHYSICS_DRAG) {
-    sum += *((uint32_t*)&ballisticState.result.modelParams.physicsDrag.dragCoefficientK);
-  } else if (ballisticState.result.modelType == MODEL_TYPE_POLYNOMIAL_FIT) {
-    sum += *((uint32_t*)&ballisticState.result.modelParams.polynomialFit.coefficientA);
-    sum += *((uint32_t*)&ballisticState.result.modelParams.polynomialFit.coefficientB);
-    sum += *((uint32_t*)&ballisticState.result.modelParams.polynomialFit.coefficientC);
+  // ENTER键记录当前点并切换到下一个距离
+  if (isButtonPressed(BTN_INDEX_ENTER)) {
+    // 记录当前Y轴偏移值（相对于中心）
+    ballisticState.tempPixelOffsets[ballisticState.currentPoint] = ballisticState.impactY - ballisticState.centerY;
+    ballisticState.pointRecorded[ballisticState.currentPoint] = true;
+    
+    // 自动切换到下一个距离点
+    if (ballisticState.currentPoint < CALIB_POINT_COUNT - 1) {
+      ballisticState.currentPoint++;
+      // 重置弹着点到中心位置
+      ballisticState.impactX = ballisticState.centerX;
+      ballisticState.impactY = ballisticState.centerY;
+      needRedraw = true;
+    } else {
+      // 所有点都校准完成，保存数据并退出手动校准模式
+      ballisticState.result.pixelOffset5m = ballisticState.tempPixelOffsets[0];
+      ballisticState.result.pixelOffset10m = ballisticState.tempPixelOffsets[1];
+      ballisticState.result.pixelOffset15m = ballisticState.tempPixelOffsets[2];
+      ballisticState.result.isCalibrated = true;
+      ballisticState.result.calibratedPoints = 3;
+      
+      // 计算校验和
+      uint32_t sum = 0;
+      sum += ballisticState.result.pixelOffset5m;
+      sum += ballisticState.result.pixelOffset10m;
+      sum += ballisticState.result.pixelOffset15m;
+      ballisticState.result.checksum = (uint16_t)(sum & 0xFFFF);
+      
+      // 保存到EEPROM
+      PresetData currentPreset;
+      loadPresetData(presetManagerState.selectedPreset, currentPreset);
+      currentPreset.ballisticCalib = ballisticState.result;
+      savePresetData(presetManagerState.selectedPreset, currentPreset);
+      
+      ballisticState.calibrationComplete = true;
+      ballisticState.calibrationMode = CALIB_MODE_MENU;
+      // 返回到弹道校准菜单界面
+      currentMode = MODE_BALLISTIC_CALIBRATION;
+      drawBallisticCalibrationScreen();
+      return;
+    }
   }
   
-  sum += *((uint32_t*)&pitch5);
-  sum += *((uint32_t*)&pitch10);
-  sum += *((uint32_t*)&pitch15);
-  sum += *((uint32_t*)&ballisticState.result.mountAngleOffset);
-  ballisticState.result.checksum = (uint16_t)(sum & 0xFFFF);
-  
-  
-  if (ballisticState.result.modelType == MODEL_TYPE_OFF) {
-    
-  } else if (ballisticState.result.modelType == MODEL_TYPE_PHYSICS_DRAG) {
-    
-    
-  } else {
-    
-    
-    
-    
-    
-    
+  if (needRedraw) {
+    drawCalibrationAdjustScreen();
   }
-  
-  
-  
-  
-  return true;
 }
+
 
 void drawBallisticCalibrationScreen() {
   if (!g_display) return;
   
+  // 如果处于手动调整模式，绘制调整界面
+  if (ballisticState.calibrationMode == CALIB_MODE_ADJUSTING) {
+    drawCalibrationAdjustScreen();
+    return;
+  }
   
   if (currentMode != MODE_BALLISTIC_CALIBRATION) {
     return;
@@ -311,168 +200,43 @@ void drawBallisticCalibrationScreen() {
   display->clearDisplay();
   
   
-  static const char* modelNames[] = {"OFF", "Phys", "Poly"};
-  
-  
+  // 标题：Ball Calib（不可选中）
   display->fillRect(0, 0, SCREEN_WIDTH, 12, WHITE);
   display->setTextSize(1);
   display->setTextColor(BLACK);
   display->setCursor(5, 2);
-  if (ballisticState.calibrationComplete) {
-    display->print("Calibration Done");
-  } else {
-    display->print("Ballistic Calib");
-  }
+  display->print("Ball Calib");
   
   
-  char debugBuffer[20];
-  sprintf(debugBuffer, "SF:%d", ballisticState.selectedField);
-  display->setCursor(SCREEN_WIDTH - 30, 2);
-  display->print(debugBuffer);
-  
-  
-  #define BALLISTIC_TOTAL_ITEMS 4
-  
-  #define BALLISTIC_ITEMS_PER_PAGE 4
-  
-  
-  int scrollOffset = 0;
-  if (ballisticState.selectedField >= BALLISTIC_ITEMS_PER_PAGE) {
-    scrollOffset = ballisticState.selectedField - BALLISTIC_ITEMS_PER_PAGE + 1;
-    if (scrollOffset > BALLISTIC_TOTAL_ITEMS - BALLISTIC_ITEMS_PER_PAGE) {
-      scrollOffset = BALLISTIC_TOTAL_ITEMS - BALLISTIC_ITEMS_PER_PAGE;
-    }
-  }
-  
-  
-  int startIdx = scrollOffset;
-  int endIdx = min(startIdx + BALLISTIC_ITEMS_PER_PAGE, BALLISTIC_TOTAL_ITEMS);
-  
-  
-  display->setTextSize(1);
+  #define BALLISTIC_TOTAL_ITEMS 2
+  #define BALLISTIC_ITEMS_PER_PAGE 2
   
   
   int startY = 18;
   int lineHeight = 10;
   
-  for (int i = startIdx; i < endIdx; i++) {
-    int y = startY + (i - startIdx) * lineHeight;
+  // 校准完成后的特殊显示逻辑
+  if (ballisticState.calibrationComplete) {
+    // 显示校准完成信息
+    char buffer[30];
+    strcpy(buffer, "Calibration Done");
+    display->setTextColor(WHITE);
+    display->setCursor(10, startY);
+    display->print(buffer);
     
-    if (ballisticState.calibrationComplete) {
+    // 第二行：Exit 选项（始终高亮，因为这是唯一可操作的选项）
+    int exitY = startY + lineHeight;
+    display->fillRect(5, exitY - 2, SCREEN_WIDTH - 10, lineHeight - 1, WHITE);
+    display->setTextColor(BLACK);
+    display->setCursor(10, exitY);
+    display->print("Exit");
+    
+  } else {
+    // 未校准完成的正常显示逻辑
+    for (int i = 0; i < BALLISTIC_TOTAL_ITEMS; i++) {
+      int y = startY + i * lineHeight;
       
-      if (i == BALLISTIC_FIELD_MODEL_TYPE) {
-        
-        display->setTextColor(WHITE);
-        char buffer[30];
-        int currentModel = ballisticState.result.modelType;
-        if (currentModel >= MODEL_TYPE_COUNT) currentModel = 0;
-        
-        
-        const char* modelName = modelNames[currentModel];
-        
-        if (currentModel == MODEL_TYPE_OFF) {
-          
-          display->setCursor(10, y);
-          display->print(modelName);
-        }
-        else if (currentModel == MODEL_TYPE_PHYSICS_DRAG) {
-          
-          dtostrf(ballisticState.result.modelParams.physicsDrag.dragCoefficientK, 4, 2, buffer);
-          char fullBuffer[30];
-          sprintf(fullBuffer, "%s k:%s", modelName, buffer);
-          display->setCursor(10, y);
-          display->print(fullBuffer);
-        } else {
-          
-          dtostrf(ballisticState.result.modelParams.polynomialFit.coefficientA, 4, 2, buffer);
-          char fullBuffer[30];
-          sprintf(fullBuffer, "%s a:%s", modelName, buffer);
-          display->setCursor(10, y);
-          display->print(fullBuffer);
-        }
-      }
-      else if (i == BALLISTIC_FIELD_CALIBRATION) {
-        
-        display->setTextColor(WHITE);
-        
-        char buffer[30];
-        float pitch5_rad = ballisticState.result.pitch5m;
-        float pitch5_deg = pitch5_rad * 180.0f / M_PI;
-        
-        if (pitch5_deg > 99.9f) pitch5_deg = 99.9f;
-        if (pitch5_deg < -99.9f) pitch5_deg = -99.9f;
-        sprintf(buffer, "5m:%.1f Deg", pitch5_deg);
-        display->setCursor(10, y);
-        display->print(buffer);
-      }
-      else if (i == BALLISTIC_FIELD_SHOOT_ADJUST) {
-        
-        display->setTextColor(WHITE);
-        char buffer[30];
-        float pitch10_rad = ballisticState.result.pitch10m;
-        float pitch10_deg = pitch10_rad * 180.0f / M_PI;
-        if (pitch10_deg > 99.9f) pitch10_deg = 99.9f;
-        if (pitch10_deg < -99.9f) pitch10_deg = -99.9f;
-        sprintf(buffer, "10m:%.1f Deg", pitch10_deg);
-        display->setCursor(10, y);
-        display->print(buffer);
-      }
-      else if (i == BALLISTIC_FIELD_SAVE) {
-        
-        if (i == ballisticState.selectedField) {
-          display->fillRect(5, y - 2, SCREEN_WIDTH - 10, lineHeight - 1, WHITE);
-          display->setTextColor(BLACK);
-        } else {
-          display->setTextColor(WHITE);
-        }
-        char buffer[30];
-        float pitch15_rad = ballisticState.result.pitch15m;
-        float pitch15_deg = pitch15_rad * 180.0f / M_PI;
-        if (pitch15_deg > 99.9f) pitch15_deg = 99.9f;
-        if (pitch15_deg < -99.9f) pitch15_deg = -99.9f;
-        sprintf(buffer, "15m:%.1f Deg", pitch15_deg);
-        display->setCursor(10, y);
-        display->print(buffer);
-      }
-    } else {
-      
-      if (i == BALLISTIC_FIELD_MODEL_TYPE) {
-        
-        if (i == ballisticState.selectedField) {
-          display->fillRect(5, y - 2, SCREEN_WIDTH - 10, lineHeight - 1, WHITE);
-          display->setTextColor(BLACK);
-        } else {
-          display->setTextColor(WHITE);
-        }
-        char buffer[30];
-        int currentModel = ballisticState.result.modelType;
-        if (currentModel >= MODEL_TYPE_COUNT) currentModel = 0;
-        
-        sprintf(buffer, "Mdl:%s", modelNames[currentModel]);  
-        display->setCursor(10, y);
-        display->print(buffer);
-      }
-      else if (i == BALLISTIC_FIELD_CALIBRATION) {
-        
-        if (i == ballisticState.selectedField) {
-          display->fillRect(5, y - 2, SCREEN_WIDTH - 10, lineHeight - 1, WHITE);
-          display->setTextColor(BLACK);
-        } else {
-          display->setTextColor(WHITE);
-        }
-        char buffer[30];
-        const char* pointNames[] = {"5m", "10m", "15m"};  
-        sprintf(buffer, "Cal:%s", pointNames[ballisticState.currentPoint]);  
-        display->setCursor(10, y);
-        display->print(buffer);
-        
-        
-        if (ballisticState.pointRecorded[ballisticState.currentPoint]) {
-          display->setCursor(SCREEN_WIDTH - 20, y);
-          display->print("OK");
-        }
-      }
-      else if (i == BALLISTIC_FIELD_SHOOT_ADJUST) {
+      if (i == BALLISTIC_FIELD_CALIBRATION) {
         
         if (i == ballisticState.selectedField) {
           display->fillRect(5, y - 2, SCREEN_WIDTH - 10, lineHeight - 1, WHITE);
@@ -481,9 +245,9 @@ void drawBallisticCalibrationScreen() {
           display->setTextColor(WHITE);
         }
         display->setCursor(10, y);
-        display->print("Calc");  
+        display->print("Calibration");  
       }
-      else if (i == BALLISTIC_FIELD_SAVE) {
+      else if (i == BALLISTIC_FIELD_EXIT) {
         
         if (i == ballisticState.selectedField) {
           display->fillRect(5, y - 2, SCREEN_WIDTH - 10, lineHeight - 1, WHITE);
@@ -492,20 +256,8 @@ void drawBallisticCalibrationScreen() {
           display->setTextColor(WHITE);
         }
         display->setCursor(10, y);
-        display->print("Save");  
+        display->print("Exit");  
       }
-    }
-  }
-  
-  
-  if (BALLISTIC_TOTAL_ITEMS > BALLISTIC_ITEMS_PER_PAGE) {
-    
-    if (scrollOffset > 0) {
-      display->drawTriangle(SCREEN_WIDTH - 8, 14, SCREEN_WIDTH - 4, 10, SCREEN_WIDTH - 12, 10, WHITE);
-    }
-    
-    if (scrollOffset < BALLISTIC_TOTAL_ITEMS - BALLISTIC_ITEMS_PER_PAGE) {
-      display->drawTriangle(SCREEN_WIDTH - 8, SCREEN_HEIGHT - 6, SCREEN_WIDTH - 4, SCREEN_HEIGHT - 2, SCREEN_WIDTH - 12, SCREEN_HEIGHT - 2, WHITE);
     }
   }
   
@@ -515,98 +267,73 @@ void drawBallisticCalibrationScreen() {
 void handleBallisticCalibrationInput() {
   if (!g_display) return;
   
+  // 如果处于手动调整模式，处理调整输入
+  if (ballisticState.calibrationMode == CALIB_MODE_ADJUSTING) {
+    handleCalibrationAdjustInput();
+    return;
+  }
+  
   bool needRedraw = false;
   
-  
-  if (isButtonPressed(BTN_INDEX_UP)) {
-    if (ballisticState.selectedField > 0) {
-      ballisticState.selectedField--;
-      needRedraw = true;
-    }
-  }
-  if (isButtonPressed(BTN_INDEX_DOWN)) {
-    if (ballisticState.selectedField < BALLISTIC_FIELD_COUNT - 1) {
-      ballisticState.selectedField++;
-      needRedraw = true;
-    }
-  }
-  
-  
-  if (ballisticState.selectedField == BALLISTIC_FIELD_MODEL_TYPE) {
+  // 校准完成后的特殊输入处理
+  if (ballisticState.calibrationComplete) {
+    // 在校准完成后，只允许Exit操作
+    // 默认选中Exit（索引1）
+    ballisticState.selectedField = BALLISTIC_FIELD_EXIT;
     
-    if (isButtonPressed(BTN_INDEX_LEFT)) {
-      if (ballisticState.result.modelType > 0) {
-        ballisticState.result.modelType--;
-        needRedraw = true;
-      }
+    // 任何按钮按下都返回菜单（简化操作）
+    if (isButtonPressed(BTN_INDEX_ENTER) || 
+        isButtonPressed(BTN_INDEX_LEFT) || 
+        isButtonPressed(BTN_INDEX_RIGHT) ||
+        isButtonPressed(BTN_INDEX_UP) ||
+        isButtonPressed(BTN_INDEX_DOWN)) {
+      currentMode = MODE_MENU;
+      drawMenu();
+      return;
     }
-    if (isButtonPressed(BTN_INDEX_RIGHT)) {
-      if (ballisticState.result.modelType < 2) { 
-        ballisticState.result.modelType++;
-        needRedraw = true;
-      }
-    }
-  }
-  else if (!ballisticState.calibrationComplete && ballisticState.selectedField == BALLISTIC_FIELD_CALIBRATION) {
+  } else {
+    // 未校准完成的正常输入处理
     
-    if (isButtonPressed(BTN_INDEX_LEFT)) {
-      if (ballisticState.currentPoint > 0) {
-        ballisticState.currentPoint--;
+    if (isButtonPressed(BTN_INDEX_UP)) {
+      if (ballisticState.selectedField > 0) {
+        ballisticState.selectedField--;
         needRedraw = true;
       }
     }
-    if (isButtonPressed(BTN_INDEX_RIGHT)) {
-      if (ballisticState.currentPoint < 2) { 
-        ballisticState.currentPoint++;
+    if (isButtonPressed(BTN_INDEX_DOWN)) {
+      if (ballisticState.selectedField < BALLISTIC_FIELD_COUNT - 1) {
+        ballisticState.selectedField++;
         needRedraw = true;
       }
     }
-  }
-  
-  
-  if (isButtonPressed(BTN_INDEX_ENTER)) {
-    if (ballisticState.calibrationComplete) {
-      if (ballisticState.selectedField == BALLISTIC_FIELD_SAVE) {
-        PresetData currentPreset;
-        loadPresetData(presetManagerState.selectedPreset, currentPreset);
-        currentPreset.ballisticCalib = ballisticState.result;
-        savePresetData(presetManagerState.selectedPreset, currentPreset);
+    
+    
+    if (isButtonPressed(BTN_INDEX_ENTER)) {
+      if (ballisticState.selectedField == BALLISTIC_FIELD_CALIBRATION) {
+        // ENTER键进入手动校准模式
+        ballisticState.calibrationMode = CALIB_MODE_ADJUSTING;
+        ballisticState.currentPoint = CALIB_POINT_5M; // 从5m开始
+        ballisticState.impactX = ballisticState.centerX;
+        ballisticState.impactY = ballisticState.centerY;
+        drawCalibrationAdjustScreen();
+        return;
+      }
+      else if (ballisticState.selectedField == BALLISTIC_FIELD_EXIT) {
         currentMode = MODE_MENU;
         drawMenu();
         return;
       }
-      else if (ballisticState.selectedField == BALLISTIC_FIELD_SHOOT_ADJUST) {
-        bool allPointsRecorded = ballisticState.pointRecorded[0] && 
-                               ballisticState.pointRecorded[1] && 
-                               ballisticState.pointRecorded[2];
-        if (allPointsRecorded && calculateBallisticCoefficients()) {
-          needRedraw = true;
-        }
-      }
-    } else {
-      if (ballisticState.selectedField == BALLISTIC_FIELD_CALIBRATION) {
-        float currentPitch = getIMUPitch();
-        ballisticState.recordedPitch[ballisticState.currentPoint] = currentPitch;
-        ballisticState.pointRecorded[ballisticState.currentPoint] = true;
-        needRedraw = true;
-        if (ballisticState.currentPoint < CALIB_POINT_COUNT - 1) {
-          ballisticState.currentPoint++;
-        }
-      }
-      else if (ballisticState.selectedField == BALLISTIC_FIELD_SHOOT_ADJUST) {
-        if (calculateBallisticCoefficients()) {
-          ballisticState.calibrationComplete = true;
-          ballisticState.selectedField = BALLISTIC_FIELD_SAVE;
-          needRedraw = true;
-        }
-      }
-      else if (ballisticState.selectedField == BALLISTIC_FIELD_SAVE) {
-        PresetData currentPreset;
-        loadPresetData(presetManagerState.selectedPreset, currentPreset);
-        currentPreset.ballisticCalib = ballisticState.result;
-        savePresetData(presetManagerState.selectedPreset, currentPreset);
-        currentMode = MODE_MENU;
-        drawMenu();
+    }
+    
+    // LEFT/RIGHT也应该作为确认操作
+    if (isButtonPressed(BTN_INDEX_LEFT) || isButtonPressed(BTN_INDEX_RIGHT)) {
+      if (ballisticState.selectedField == BALLISTIC_FIELD_CALIBRATION && !ballisticState.calibrationComplete) {
+        // LEFT/RIGHT在校准字段上也进入手动校准模式
+        ballisticState.calibrationMode = CALIB_MODE_ADJUSTING;
+        ballisticState.currentPoint = CALIB_POINT_5M;
+        ballisticState.impactX = ballisticState.centerX;
+        ballisticState.impactY = ballisticState.centerY;
+        drawCalibrationAdjustScreen();
         return;
       }
     }

@@ -6,7 +6,7 @@
 #include "preset_manager.h"
 
 
-MountAngleOffsetState mountAngleOffsetState = {0, MOUNT_ANGLE_OFFSET_FIELD_CROSSHAIR};
+MountAngleOffsetState mountAngleOffsetState = {0, 0, MOUNT_ANGLE_OFFSET_FIELD_CROSSHAIR, false};
 
 
 extern int g_activePresetIndex;
@@ -15,7 +15,8 @@ void initMountAngleOffset() {
   
   PresetData currentPreset;
   loadPresetData(g_activePresetIndex, currentPreset);
-  mountAngleOffsetState.mountAngleOffset = currentPreset.mountAngleOffset;
+  mountAngleOffsetState.mountAngleOffsetY = currentPreset.mountAngleOffset;
+  mountAngleOffsetState.mountAngleOffsetX = currentPreset.mountAngleOffsetX;
   mountAngleOffsetState.selectedField = MOUNT_ANGLE_OFFSET_FIELD_CROSSHAIR;
   mountAngleOffsetState.adjustingCrosshair = false;
 }
@@ -36,10 +37,11 @@ void drawMountAngleOffsetScreen() {
   
   if (mountAngleOffsetState.adjustingCrosshair) {
     
-    int centerX = SCREEN_WIDTH / 2;
-    int centerY = SCREEN_HEIGHT / 2 + mountAngleOffsetState.mountAngleOffset;
+    int centerX = SCREEN_WIDTH / 2 + mountAngleOffsetState.mountAngleOffsetX;
+    int centerY = SCREEN_HEIGHT / 2 + mountAngleOffsetState.mountAngleOffsetY;
     
     
+    centerX = constrain(centerX, 0, SCREEN_WIDTH - 1);
     centerY = constrain(centerY, 0, SCREEN_HEIGHT - 1);
     
     
@@ -51,8 +53,10 @@ void drawMountAngleOffsetScreen() {
     display->setTextSize(1);
     display->setTextColor(WHITE);
     display->setCursor(5, SCREEN_HEIGHT - 10);
-    display->print("Offset: ");
-    display->print(mountAngleOffsetState.mountAngleOffset);
+    display->print("X:");
+    display->print(mountAngleOffsetState.mountAngleOffsetX);
+    display->print(" Y:");
+    display->print(mountAngleOffsetState.mountAngleOffsetY);
     display->print(" px");
   } else {
     
@@ -91,12 +95,22 @@ void handleMountAngleOffsetInput() {
   if (mountAngleOffsetState.adjustingCrosshair) {
     
     if (isButtonPressed(BTN_INDEX_UP)) {
-      mountAngleOffsetState.mountAngleOffset--;
+      mountAngleOffsetState.mountAngleOffsetY--;
       needRedraw = true;
     }
     
     if (isButtonPressed(BTN_INDEX_DOWN)) {
-      mountAngleOffsetState.mountAngleOffset++;
+      mountAngleOffsetState.mountAngleOffsetY++;
+      needRedraw = true;
+    }
+    
+    if (isButtonPressed(BTN_INDEX_LEFT)) {
+      mountAngleOffsetState.mountAngleOffsetX--;
+      needRedraw = true;
+    }
+    
+    if (isButtonPressed(BTN_INDEX_RIGHT)) {
+      mountAngleOffsetState.mountAngleOffsetX++;
       needRedraw = true;
     }
     
@@ -131,7 +145,8 @@ void handleMountAngleOffsetInput() {
         
         PresetData currentPreset;
         loadPresetData(g_activePresetIndex, currentPreset);
-        currentPreset.mountAngleOffset = mountAngleOffsetState.mountAngleOffset;
+        currentPreset.mountAngleOffset = mountAngleOffsetState.mountAngleOffsetY;
+        currentPreset.mountAngleOffsetX = mountAngleOffsetState.mountAngleOffsetX;
         savePresetData(g_activePresetIndex, currentPreset);
         
         

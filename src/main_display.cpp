@@ -67,7 +67,7 @@ float cachedIMUPitchForBallistics = 0.0f;
 float cachedIMURollForBallistics = 0.0f;
 
 
-static float currentStability = 0.0f;
+static int currentStability = 0.0f;
 
 
 #define STABILITY_WINDOW_SIZE 8
@@ -82,13 +82,12 @@ static unsigned long lastStabilityUpdateTime = 0;
 
 
 
-int centerX = SCREEN_WIDTH / 2;
-int centerY = SCREEN_HEIGHT / 2;
+int getCrosshairCenterX() {
+    return SCREEN_WIDTH / 2 + currentActivePreset.mountAngleOffsetX;
+}
 
-
-
-inline int getCrosshairCenterY() {
-    return centerY + currentActivePreset.mountAngleOffset;
+int getCrosshairCenterY() {
+    return SCREEN_HEIGHT / 2 + currentActivePreset.mountAngleOffset;
 }
 
 
@@ -348,112 +347,46 @@ void drawDropPoint(Adafruit_SSD1306* display, float distance) {
     return; 
   }
   
+  // 计算准星中心位置，考虑mount angle offset的X和Y方向
+  int crosshairCenterX = SCREEN_WIDTH / 2 + currentActivePreset.mountAngleOffsetX;
+  int crosshairCenterY = SCREEN_HEIGHT / 2 + currentActivePreset.mountAngleOffset;
   
+  // 使用新的像素偏移计算方式
+  int pixelOffsetY = calculateDropPointPixelOffset((int)distance, currentActivePreset.ballisticCalib);
   
+  // X方向：先使用弹道修正（风偏等），然后根据需要添加IMU滚转补偿
+  float pixelOffsetX = 0.0f;
   
-  
-  
-  BallisticResult result = calculateBallisticCorrection(
-    distance, 
-    currentActivePreset.bulletVelocity,
-    windState.speed,
-    windState.direction,
-    currentActivePreset.ballisticCalib
-  );
-  
-  if (!result.isValid) {
-    return;
-  }
-  
-  
-  if (isnan(result.correctionPitch) || isnan(result.correctionYaw)) {
-    return;
-  }
-  
-  
-  ArcPointsMode arcMode = static_cast<ArcPointsMode>(currentActivePreset.arcPointState);
-  bool shouldBlink = (arcMode == ARC_POINTS_BLINKING);
-  
-  
-  unsigned long currentTime = millis();
-  if (shouldBlink) {
-    if (currentTime - lastBlinkTime >= DROP_POINT_BLINK_INTERVAL) {
-      dropPointVisible = !dropPointVisible;
-      lastBlinkTime = currentTime;
+  // 如果有风偏，仍然使用原有的风偏计算
+  if (windState.speed > 0.5f && currentActivePreset.bulletVelocity > 0.0f) {
+    BallisticResult result = calculateBallisticCorrection(
+      distance, 
+      currentActivePreset.bulletVelocity,
+      windState.speed,
+      windState.direction,
+      currentActivePreset.ballisticCalib
+    );
+    if (result.isValid) {
+      pixelOffsetX = result.correctionYaw * DROP_POINT_PX_PER_RADIAN;
     }
-  } else {
-    
-    dropPointVisible = true;
-    
-    lastBlinkTime = currentTime;
   }
   
-  
-  float currentIMUPitch = cachedIMUPitchForBallistics;
-
-  
-  if (isnan(currentIMUPitch)) {
-    currentIMUPitch = 0.0f;
-  }
-
-  
-  
-  
-
-  
-  
-  
-  
-  
-  
-  float baseDropMeters = distance * tan(result.correctionPitch);
-  
-  
-  float finalDropMeters = baseDropMeters;
-  
-  
-  if (finalDropMeters < 0.0f) {
-    finalDropMeters = 0.0f;
-  }
-  
-  
-  
-  
-  float visualDropAngle = atan2(finalDropMeters, distance);  
-  float pixelOffsetY = visualDropAngle * DROP_POINT_PX_PER_RADIAN;
-  
-  
-  float pixelOffsetX = result.correctionYaw * DROP_POINT_PX_PER_RADIAN;
-  
-  
-  
+  // 添加IMU滚转补偿（如果启用）
   if (currentActivePreset.tiltModeEnabled) {
-    
     float currentIMURoll = cachedIMURollForBallistics;
-    
-    
     if (isnan(currentIMURoll)) {
       currentIMURoll = 0.0f;
     }
-    
-    
-    
-    
-    
-    
-    float tiltCorrectionAngle = -currentIMURoll * TILT_CORRECTION_SCALE;  
+    float tiltCorrectionAngle = currentIMURoll * TILT_CORRECTION_SCALE;  
     float tiltPixelOffsetX = tiltCorrectionAngle * DROP_POINT_PX_PER_RADIAN;
-    
-    
     pixelOffsetX += tiltPixelOffsetX;
   }
   
-  
-  if (isnan(pixelOffsetX) || isnan(pixelOffsetY)) {
-    return;
+  if (isnan(pixelOffsetX)) {
+    pixelOffsetX = 0.0f;
   }
   
-  
+  // 应用像素偏移限制
   float maxYOffset = SCREEN_HEIGHT / 2.0f - 2;
   float maxXOffset = SCREEN_WIDTH / 2.0f - 2;
   
@@ -462,28 +395,38 @@ void drawDropPoint(Adafruit_SSD1306* display, float distance) {
   if (pixelOffsetX < -maxXOffset) pixelOffsetX = -maxXOffset;
   if (pixelOffsetX > maxXOffset) pixelOffsetX = maxXOffset;
   
-  
-  float rawDropPointX = centerX + pixelOffsetX;
-  float rawDropPointY = (centerY + currentActivePreset.mountAngleOffset) + pixelOffsetY;  
-  
-  
+  // 计算最终的弹着点坐标
+  float rawDropPointX = crosshairCenterX + pixelOffsetX;
+  float rawDropPointY = crosshairCenterY + pixelOffsetY;  
   
   int dropPointX = (int)round(rawDropPointX);
   int dropPointY = (int)round(rawDropPointY);
   
-  
+  // 边界检查
   if (dropPointX < 0) dropPointX = 0;
   if (dropPointX >= SCREEN_WIDTH) dropPointX = SCREEN_WIDTH - 1;
   if (dropPointY < 0) dropPointY = 0;
   if (dropPointY >= SCREEN_HEIGHT) dropPointY = SCREEN_HEIGHT - 1;
   
+  // 显示弹着点（根据闪烁模式）
+  ArcPointsMode arcMode = static_cast<ArcPointsMode>(currentActivePreset.arcPointState);
+  bool shouldBlink = (arcMode == ARC_POINTS_BLINKING);
+  
+  unsigned long currentTime = millis();
+  if (shouldBlink) {
+    if (currentTime - lastBlinkTime >= DROP_POINT_BLINK_INTERVAL) {
+      dropPointVisible = !dropPointVisible;
+      lastBlinkTime = currentTime;
+    }
+  } else {
+    dropPointVisible = true;
+    lastBlinkTime = currentTime;
+  }
   
   if (dropPointVisible) {
-    
     int size = 3;
     int startX = dropPointX - size / 2;
     int startY = dropPointY - size / 2;
-    
     
     if (startX < 0) startX = 0;
     if (startY < 0) startY = 0;
@@ -493,16 +436,14 @@ void drawDropPoint(Adafruit_SSD1306* display, float distance) {
     display->fillRect(startX, startY, size, size, WHITE);
   }
   
-  
+  // 显示超出范围指示器
   if (pixelOffsetY < -8.0f) {
-    
     int arrowX = SCREEN_WIDTH - 10;
     int arrowY = 10;
     display->drawLine(arrowX, arrowY + 3, arrowX, arrowY - 3, WHITE);
     display->drawLine(arrowX, arrowY - 3, arrowX - 2, arrowY - 1, WHITE);
     display->drawLine(arrowX, arrowY - 3, arrowX + 2, arrowY - 1, WHITE);
   } else if (pixelOffsetY > 8.0f) {
-    
     int arrowX = SCREEN_WIDTH - 10;
     int arrowY = 10;
     display->drawLine(arrowX, arrowY - 3, arrowX, arrowY + 3, WHITE);
@@ -726,22 +667,45 @@ void drawMainDisplay() {
   drawWindDirectionArrow(display, arrowX, arrowY, displayWindDirection);
   
   
+  // 计算准星中心位置（考虑安装偏移）
+  int crosshairCenterX = SCREEN_WIDTH / 2 + currentActivePreset.mountAngleOffsetX;
+  int crosshairCenterY = SCREEN_HEIGHT / 2 + currentActivePreset.mountAngleOffset;
+  
+  // 处理测距和弹着点显示
+  bool hasValidDistance = false;
+  float displayDistance = rangeFinderState.distance;
+  
   if (rangeFinderState.selectedMode == RANGE_MODE_SINGLE || 
       rangeFinderState.selectedMode == RANGE_MODE_CONTINUOUS) {
-    drawDistanceInfo(display, rangeFinderState.distance);
+    drawDistanceInfo(display, displayDistance);
     
-    
-    if (rangeFinderState.distance > 0.0f) {
-      drawDropPoint(display, rangeFinderState.distance);
+    if (displayDistance > 0.5f) { // 距离大于0.5米才认为有效
+      hasValidDistance = true;
     }
+  }
+  
+  // 根据距离情况绘制弹着点
+  if (hasValidDistance) {
+    // 有有效距离：绘制包含弹道下坠的弹着点
+    drawDropPoint(display, displayDistance);
+  } else {
+    // 无有效距离或距离很近：在准星中央绘制弹着点
+    int size = 3;
+    int startX = crosshairCenterX - size / 2;
+    int startY = crosshairCenterY - size / 2;
+    
+    if (startX < 0) startX = 0;
+    if (startY < 0) startY = 0;
+    if (startX + size > SCREEN_WIDTH) startX = SCREEN_WIDTH - size;
+    if (startY + size > SCREEN_HEIGHT) startY = SCREEN_HEIGHT - size;
+    
+    display->fillRect(startX, startY, size, size, WHITE);
   }
   
 
   
-  
-  int dynamicCrosshairY = centerY + currentActivePreset.mountAngleOffset;
-  
-  drawCrosshair(centerX, dynamicCrosshairY, crosshairState.selectedType);
+  // 绘制准星
+  drawCrosshair(crosshairCenterX, crosshairCenterY, crosshairState.selectedType);
   
   
   

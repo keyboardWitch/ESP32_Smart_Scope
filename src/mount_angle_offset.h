@@ -13,7 +13,8 @@ enum MountAngleOffsetField {
 
 
 struct MountAngleOffsetState {
-  int mountAngleOffset;           
+  int mountAngleOffsetX;          
+  int mountAngleOffsetY;          
   int selectedField;              
   bool adjustingCrosshair;        
 };
@@ -26,4 +27,4 @@ void initMountAngleOffset();
 void drawMountAngleOffsetScreen();
 void handleMountAngleOffsetInput();
 
-#endif 
+#endif

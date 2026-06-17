@@ -15,7 +15,7 @@
 #define MPU6050_ADDR    0x68 // Default I2C address for MPU6050
 
 // ==================== ACTIVE TOF Module Configuration ====================
-#define TOF_ACTIVE 50 // Currently used TOF module (50 or 600)
+#define TOF_ACTIVE 600 // Currently used TOF module (50 or 600)
 #if TOF_ACTIVE == 50
 #define UART_RX         20   // ESP32C3 GPIO20 (RX)
 #define UART_TX         21   // ESP32C3 GPIO21 (TX)
@@ -26,6 +26,7 @@
 #elif TOF_ACTIVE == 600
 #define UART_RX         5   // ESP32C3 GPIO20 (RX)
 #define UART_TX         6   // ESP32C3 GPIO21 (TX)
+// #define TOF_POWER_ON    7   // ESP32C3 GPIO10 (Power On)
 #define UART_BAUDRATE   9600 // Baud rate
 #define TOF_MIN_DISTANCE 0.1f  // Minimum valid distance 0.1 meters
 #define TOF_MAX_DISTANCE 600.0f // Maximum valid distance 600 meters
